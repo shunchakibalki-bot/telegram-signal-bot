@@ -8,14 +8,16 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 
 # ============================================================
-# BEGZOD AI XAU/USD V4
-# STRICT MULTI-TIMEFRAME SIGNAL ENGINE
+# BEGZOD AI XAU/USD V4.2
+# AUTO SIGNAL + TRADE TRACKER
 # ============================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 TWELVE_API_KEY = os.getenv("TWELVE_API_KEY")
 
 SYMBOL = "XAU/USD"
+
+TIMEOUT = 25
 
 TELEGRAM_API = ""
 
@@ -25,17 +27,37 @@ if BOT_TOKEN:
         + BOT_TOKEN
     )
 
-TIMEOUT = 25
 
-# Signal requirements
+# ============================================================
+# SIGNAL SETTINGS
+# ============================================================
+
 MIN_SCORE = 9
 
-# ATR based risk
 SL_ATR_MULTIPLIER = 1.20
 
-# Do not allow excessively stretched 1M entries
 RSI_BUY_MAX = 68.0
 RSI_SELL_MIN = 32.0
+
+
+# ============================================================
+# AUTO SIGNAL SETTINGS
+# ============================================================
+
+AUTO_SIGNAL_ENABLED = True
+
+AUTO_CHECK_SECONDS = 60
+
+TRACKER_CHECK_SECONDS = 15
+
+AUTO_COOLDOWN_SECONDS = 15 * 60
+
+AUTO_CHAT_IDS = set()
+
+LAST_AUTO_SIGNAL = None
+LAST_AUTO_SENT_TIME = 0
+
+ACTIVE_TRADE = None
 
 
 # ============================================================
@@ -43,8 +65,8 @@ RSI_SELL_MIN = 32.0
 # ============================================================
 
 print("==========================================")
-print("BEGZOD AI XAU/USD V4")
-print("STRICT SIGNAL ENGINE")
+print("BEGZOD AI XAU/USD V4.2")
+print("AUTO SIGNAL + TRADE TRACKER")
 print("==========================================")
 
 print(
@@ -109,31 +131,6 @@ def telegram_request(method, data=None):
         return None
 
 
-def send_message(
-    chat_id,
-    text,
-    keyboard=True
-):
-
-    data = {
-        "chat_id": chat_id,
-        "text": text,
-        "parse_mode": "HTML"
-    }
-
-    if keyboard:
-
-        data["reply_markup"] = json.dumps(
-            main_keyboard(),
-            ensure_ascii=False
-        )
-
-    telegram_request(
-        "sendMessage",
-        data
-    )
-
-
 def main_keyboard():
 
     return {
@@ -170,6 +167,31 @@ def main_keyboard():
         ],
         "resize_keyboard": True
     }
+
+
+def send_message(
+    chat_id,
+    text,
+    keyboard=True
+):
+
+    data = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "HTML"
+    }
+
+    if keyboard:
+
+        data["reply_markup"] = json.dumps(
+            main_keyboard(),
+            ensure_ascii=False
+        )
+
+    telegram_request(
+        "sendMessage",
+        data
+    )
 
 
 # ============================================================
@@ -309,18 +331,23 @@ def get_candles(
                         "datetime",
                         ""
                     ),
+
                     "open": float(
                         item["open"]
                     ),
+
                     "high": float(
                         item["high"]
                     ),
+
                     "low": float(
                         item["low"]
                     ),
+
                     "close": float(
                         item["close"]
                     ),
+
                     "volume": float(
                         item.get(
                             "volume",
@@ -534,9 +561,9 @@ def structure(
         for c in recent
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # BOS
-    # --------------------------------------------------------
+    # ========================================================
 
     if last["close"] > high:
 
@@ -546,9 +573,9 @@ def structure(
 
         result["bos"] = "BEARISH"
 
-    # --------------------------------------------------------
+    # ========================================================
     # LIQUIDITY SWEEP
-    # --------------------------------------------------------
+    # ========================================================
 
     if (
         last["low"] < low
@@ -566,9 +593,9 @@ def structure(
 
         result["sweep"] = "BEARISH"
 
-    # --------------------------------------------------------
+    # ========================================================
     # CHoCH
-    # --------------------------------------------------------
+    # ========================================================
 
     if (
         previous["close"]
@@ -658,19 +685,32 @@ def timeframe_analysis(
         trend = "BEARISH"
 
     return {
+
+        "time": last["time"],
+
         "price": last["close"],
+
         "ema20": ema20,
+
         "ema50": ema50,
+
         "rsi": current_rsi,
+
         "atr": current_atr,
+
         "trend": trend,
+
         "bos": market_structure["bos"],
+
         "choch": market_structure["choch"],
+
         "sweep": market_structure["sweep"],
+
         "bullish_candle": (
             last["close"] >
             last["open"]
         ),
+
         "bearish_candle": (
             last["close"] <
             last["open"]
@@ -685,7 +725,7 @@ def timeframe_analysis(
 def generate_signal():
 
     print(
-        "V4 analysis started..."
+        "V4.2 analysis started..."
     )
 
     tf15 = timeframe_analysis(
@@ -722,7 +762,7 @@ def generate_signal():
     sell_reasons = []
 
     # ========================================================
-    # 15M BIAS
+    # 15M
     # ========================================================
 
     if tf15["trend"] == "BULLISH":
@@ -742,7 +782,7 @@ def generate_signal():
         )
 
     # ========================================================
-    # 5M SETUP
+    # 5M TREND
     # ========================================================
 
     if tf5["trend"] == "BULLISH":
@@ -761,7 +801,9 @@ def generate_signal():
             "5M bearish trend"
         )
 
+    # ========================================================
     # 5M BOS
+    # ========================================================
 
     if tf5["bos"] == "BULLISH":
 
@@ -808,7 +850,7 @@ def generate_signal():
         )
 
     # ========================================================
-    # 1M ENTRY
+    # 1M TREND
     # ========================================================
 
     if tf1["trend"] == "BULLISH":
@@ -848,7 +890,7 @@ def generate_signal():
         )
 
     # ========================================================
-    # 1M CHOCH
+    # 1M CHoCH
     # ========================================================
 
     if tf1["choch"] == "BULLISH":
@@ -916,7 +958,7 @@ def generate_signal():
         )
 
     # ========================================================
-    # MOMENTUM CANDLE
+    # CANDLE
     # ========================================================
 
     if tf1["bullish_candle"]:
@@ -936,18 +978,8 @@ def generate_signal():
         )
 
     # ========================================================
-    # STRICT DIRECTION FILTER
+    # STRUCTURE FILTER
     # ========================================================
-
-    # BUY requires:
-    #
-    # 15M bullish
-    # 5M bullish
-    # 1M bullish
-    #
-    # AND
-    #
-    # 1M BOS OR CHoCH OR liquidity sweep
 
     buy_structure = (
         tf1["bos"] == "BULLISH"
@@ -964,6 +996,10 @@ def generate_signal():
         or
         tf1["sweep"] == "BEARISH"
     )
+
+    # ========================================================
+    # ALIGNMENT
+    # ========================================================
 
     buy_alignment = (
         tf15["trend"] == "BULLISH"
@@ -985,7 +1021,7 @@ def generate_signal():
     # CONFIDENCE
     # ========================================================
 
-    max_possible = 22
+    max_possible = 20
 
     best_score = max(
         buy_score,
@@ -1026,7 +1062,6 @@ def generate_signal():
         )
 
         if risk <= 0:
-
             risk = 2.0
 
         stop_loss = (
@@ -1051,17 +1086,29 @@ def generate_signal():
 
         return {
             "signal": "BUY",
+
             "entry": entry,
+
             "sl": stop_loss,
+
             "tp1": tp1,
+
             "tp2": tp2,
+
             "tp3": tp3,
+
             "confidence": confidence,
+
             "buy_score": buy_score,
+
             "sell_score": sell_score,
+
             "tf15": tf15,
+
             "tf5": tf5,
+
             "tf1": tf1,
+
             "reasons": buy_reasons
         }
 
@@ -1089,7 +1136,6 @@ def generate_signal():
         )
 
         if risk <= 0:
-
             risk = 2.0
 
         stop_loss = (
@@ -1114,17 +1160,29 @@ def generate_signal():
 
         return {
             "signal": "SELL",
+
             "entry": entry,
+
             "sl": stop_loss,
+
             "tp1": tp1,
+
             "tp2": tp2,
+
             "tp3": tp3,
+
             "confidence": confidence,
+
             "buy_score": buy_score,
+
             "sell_score": sell_score,
+
             "tf15": tf15,
+
             "tf5": tf5,
+
             "tf1": tf1,
+
             "reasons": sell_reasons
         }
 
@@ -1134,16 +1192,27 @@ def generate_signal():
 
     return {
         "signal": "WAIT",
+
         "price": tf1["price"],
+
         "confidence": confidence,
+
         "buy_score": buy_score,
+
         "sell_score": sell_score,
+
         "tf15": tf15,
+
         "tf5": tf5,
+
         "tf1": tf1,
+
         "buy_alignment": buy_alignment,
+
         "sell_alignment": sell_alignment,
+
         "buy_structure": buy_structure,
+
         "sell_structure": sell_structure
     }
 
@@ -1167,14 +1236,10 @@ def signal_message():
     tf5 = result["tf5"]
     tf1 = result["tf1"]
 
-    # ========================================================
-    # WAIT
-    # ========================================================
-
     if result["signal"] == "WAIT":
 
         return (
-            "🟡 <b>XAU/USD V4</b>\n\n"
+            "🟡 <b>XAU/USD V4.2</b>\n\n"
 
             "⏳ <b>WAIT</b>\n\n"
 
@@ -1216,27 +1281,11 @@ def signal_message():
             "🔴 Sell score: "
             f"<b>{result['sell_score']}</b>\n\n"
 
-            "🧠 Confidence: "
-            f"<b>{result['confidence']}%</b>\n\n"
+            "🧠 Setup Strength: "
+            f"<b>{result['confidence']}/100</b>\n\n"
 
-            "🔒 <b>ENTRY FILTER</b>\n"
-
-            "BUY alignment: "
-            f"<b>{'YES' if result['buy_alignment'] else 'NO'}</b>\n"
-
-            "SELL alignment: "
-            f"<b>{'YES' if result['sell_alignment'] else 'NO'}</b>\n\n"
-
-            "❌ Kuchli entry tasdig‘i "
-            "yo‘q.\n\n"
-
-            "V4 1M confirmation bo‘lmasa "
-            "signal bermaydi."
+            "❌ Kuchli entry tasdig‘i yo‘q."
         )
-
-    # ========================================================
-    # BUY / SELL
-    # ========================================================
 
     emoji = (
         "🟢"
@@ -1307,19 +1356,950 @@ def signal_message():
         "1M Liquidity: "
         f"<b>{tf1['sweep']}</b>\n\n"
 
-        "🧠 Confidence: "
-        f"<b>{result['confidence']}%</b>\n\n"
+        "🧠 Setup Strength: "
+        f"<b>{result['confidence']}/100</b>\n\n"
 
         "✅ <b>CONFIRMATIONS</b>\n"
+
         + reason_text +
 
-        "\n⚠️ Confidence win-rate "
-        "kafolati emas."
+        "\n⚠️ Bu avtomatik texnik "
+        "signal. Win-rate kafolati emas."
     )
 
 
 # ============================================================
-# TECHNICAL ANALYSIS
+# AUTO SIGNAL MESSAGE
+# ============================================================
+
+def auto_signal_message(
+    result,
+    live_price
+):
+
+    tf15 = result["tf15"]
+    tf5 = result["tf5"]
+    tf1 = result["tf1"]
+
+    signal = result["signal"]
+
+    emoji = (
+        "🟢"
+        if signal == "BUY"
+        else "🔴"
+    )
+
+    reasons = result.get(
+        "reasons",
+        []
+    )
+
+    reason_text = ""
+
+    for reason in reasons[:8]:
+
+        reason_text += (
+            "• "
+            + reason
+            + "\n"
+        )
+
+    return (
+        "🚨 <b>BEGZOD AI V4.2</b>\n\n"
+
+        f"{emoji} <b>XAU/USD {signal}</b>\n\n"
+
+        "💰 Live Price: "
+        f"<b>{live_price:.2f}</b>\n\n"
+
+        "🎯 Entry: "
+        f"<b>{result['entry']:.2f}</b>\n"
+
+        "🛑 Stop Loss: "
+        f"<b>{result['sl']:.2f}</b>\n\n"
+
+        "💰 TP1: "
+        f"<b>{result['tp1']:.2f}</b>\n"
+
+        "💰 TP2: "
+        f"<b>{result['tp2']:.2f}</b>\n"
+
+        "💰 TP3: "
+        f"<b>{result['tp3']:.2f}</b>\n\n"
+
+        "📊 15M: "
+        f"<b>{tf15['trend']}</b>\n"
+
+        "📊 5M: "
+        f"<b>{tf5['trend']}</b>\n"
+
+        "📊 1M: "
+        f"<b>{tf1['trend']}</b>\n\n"
+
+        "🔎 <b>STRUCTURE</b>\n"
+
+        "5M BOS: "
+        f"<b>{tf5['bos']}</b>\n"
+
+        "1M BOS: "
+        f"<b>{tf1['bos']}</b>\n"
+
+        "1M CHoCH: "
+        f"<b>{tf1['choch']}</b>\n"
+
+        "1M Liquidity: "
+        f"<b>{tf1['sweep']}</b>\n\n"
+
+        "📈 5M RSI: "
+        f"<b>{tf5['rsi']:.1f}</b>\n"
+
+        "📉 1M RSI: "
+        f"<b>{tf1['rsi']:.1f}</b>\n\n"
+
+        "🧠 Setup Strength: "
+        f"<b>{result['confidence']}/100</b>\n\n"
+
+        "🔥 <b>CONFIRMATIONS</b>\n"
+
+        + reason_text +
+
+        "\n📡 <b>Trade tracker faol.</b>\n"
+        "TP1 / TP2 / TP3 / SL kuzatiladi.\n\n"
+
+        "⚠️ Avtomatik texnik signal. "
+        "Kafolatlangan natija emas."
+    )
+
+
+# ============================================================
+# AUTO CHAT
+# ============================================================
+
+def register_auto_chat(chat_id):
+
+    if chat_id:
+
+        AUTO_CHAT_IDS.add(
+            chat_id
+        )
+
+        print(
+            "AUTO CHAT REGISTERED:",
+            chat_id
+        )
+
+
+# ============================================================
+# CREATE ACTIVE TRADE
+# ============================================================
+
+def create_active_trade(
+    result,
+    live_price
+):
+
+    global ACTIVE_TRADE
+
+    if ACTIVE_TRADE is not None:
+
+        return False
+
+    ACTIVE_TRADE = {
+
+        "signal": result["signal"],
+
+        "entry": result["entry"],
+
+        "sl": result["sl"],
+
+        "tp1": result["tp1"],
+
+        "tp2": result["tp2"],
+
+        "tp3": result["tp3"],
+
+        "confidence": result["confidence"],
+
+        "start_price": live_price,
+
+        "created_at": time.time(),
+
+        "tp1_hit": False,
+
+        "tp2_hit": False,
+
+        "tp3_hit": False,
+
+        "closed": False,
+
+        "result": None
+    }
+
+    print(
+        "ACTIVE TRADE CREATED:",
+        ACTIVE_TRADE
+    )
+
+    return True
+
+
+# ============================================================
+# SEND TO ALL AUTO CHATS
+# ============================================================
+
+def broadcast_message(
+    text
+):
+
+    sent = 0
+
+    for chat_id in list(
+        AUTO_CHAT_IDS
+    ):
+
+        try:
+
+            send_message(
+                chat_id,
+                text
+            )
+
+            sent += 1
+
+        except Exception as e:
+
+            print(
+                "Broadcast error:",
+                repr(e)
+            )
+
+    return sent
+
+
+# ============================================================
+# TRADE RESULT MESSAGE
+# ============================================================
+
+def trade_result_message(
+    event,
+    trade,
+    price
+):
+
+    signal = trade["signal"]
+
+    if event == "TP1":
+
+        return (
+            "✅ <b>TP1 HIT</b>\n\n"
+
+            f"{'🟢' if signal == 'BUY' else '🔴'} "
+            f"<b>XAU/USD {signal}</b>\n\n"
+
+            "🎯 TP1: "
+            f"<b>{trade['tp1']:.2f}</b>\n"
+
+            "💰 Current price: "
+            f"<b>{price:.2f}</b>\n\n"
+
+            "1R maqsad bajarildi.\n\n"
+
+            "⏳ TP2 / TP3 hali "
+            "kuzatilmoqda."
+        )
+
+    if event == "TP2":
+
+        return (
+            "✅ <b>TP2 HIT</b>\n\n"
+
+            f"{'🟢' if signal == 'BUY' else '🔴'} "
+            f"<b>XAU/USD {signal}</b>\n\n"
+
+            "🎯 TP1: ✅\n"
+
+            "🎯 TP2: "
+            f"<b>{trade['tp2']:.2f}</b> ✅\n\n"
+
+            "💰 Current price: "
+            f"<b>{price:.2f}</b>\n\n"
+
+            "⏳ TP3 hali kuzatilmoqda."
+        )
+
+    if event == "TP3":
+
+        return (
+            "🏆 <b>TP3 HIT</b>\n\n"
+
+            f"{'🟢' if signal == 'BUY' else '🔴'} "
+            f"<b>XAU/USD {signal}</b>\n\n"
+
+            "🎯 TP1: ✅\n"
+
+            "🎯 TP2: ✅\n"
+
+            "🎯 TP3: "
+            f"<b>{trade['tp3']:.2f}</b> ✅\n\n"
+
+            "🔥 <b>FULL TARGET ACHIEVED</b>\n\n"
+
+            "Trade yakunlandi."
+        )
+
+    if event == "SL_AFTER_TP1":
+
+        return (
+            "🛑 <b>STOP LOSS HIT</b>\n\n"
+
+            f"{'🟢' if signal == 'BUY' else '🔴'} "
+            f"<b>XAU/USD {signal}</b>\n\n"
+
+            "🎯 TP1: ✅\n"
+
+            "❌ TP2: ❌\n"
+
+            "❌ TP3: ❌\n\n"
+
+            "🛑 SL: "
+            f"<b>{trade['sl']:.2f}</b>\n\n"
+
+            "📌 <b>Natija:</b>\n"
+
+            "TP1 olindi, keyin narx "
+            "qaytib SL'ni urdi.\n\n"
+
+            "Trade yakunlandi."
+        )
+
+    if event == "SL":
+
+        return (
+            "🛑 <b>STOP LOSS HIT</b>\n\n"
+
+            f"{'🟢' if signal == 'BUY' else '🔴'} "
+            f"<b>XAU/USD {signal}</b>\n\n"
+
+            "❌ TP1 olinmadi.\n"
+
+            "❌ TP2 olinmadi.\n"
+
+            "❌ TP3 olinmadi.\n\n"
+
+            "🛑 SL: "
+            f"<b>{trade['sl']:.2f}</b>\n\n"
+
+            "📌 <b>Natija:</b>\n"
+            "Signal SL bilan yakunlandi."
+        )
+
+    return ""
+
+
+# ============================================================
+# TRADE TRACKER
+# ============================================================
+
+def check_active_trade():
+
+    global ACTIVE_TRADE
+
+    if ACTIVE_TRADE is None:
+        return
+
+    trade = ACTIVE_TRADE
+
+    if trade.get("closed"):
+        return
+
+    price = get_live_price()
+
+    if price is None:
+
+        print(
+            "TRACKER: price unavailable."
+        )
+
+        return
+
+    signal = trade["signal"]
+
+    # ========================================================
+    # BUY
+    # ========================================================
+
+    if signal == "BUY":
+
+        # ----------------------------------------------------
+        # TP3
+        # ----------------------------------------------------
+
+        if (
+            not trade["tp3_hit"]
+            and
+            price >= trade["tp3"]
+        ):
+
+            trade["tp3_hit"] = True
+            trade["closed"] = True
+            trade["result"] = "TP3"
+
+            broadcast_message(
+                trade_result_message(
+                    "TP3",
+                    trade,
+                    price
+                )
+            )
+
+            print(
+                "TRACKER: BUY TP3 HIT"
+            )
+
+            ACTIVE_TRADE = None
+
+            return
+
+        # ----------------------------------------------------
+        # TP2
+        # ----------------------------------------------------
+
+        if (
+            not trade["tp2_hit"]
+            and
+            price >= trade["tp2"]
+        ):
+
+            trade["tp2_hit"] = True
+
+            broadcast_message(
+                trade_result_message(
+                    "TP2",
+                    trade,
+                    price
+                )
+            )
+
+            print(
+                "TRACKER: BUY TP2 HIT"
+            )
+
+        # ----------------------------------------------------
+        # TP1
+        # ----------------------------------------------------
+
+        if (
+            not trade["tp1_hit"]
+            and
+            price >= trade["tp1"]
+        ):
+
+            trade["tp1_hit"] = True
+
+            broadcast_message(
+                trade_result_message(
+                    "TP1",
+                    trade,
+                    price
+                )
+            )
+
+            print(
+                "TRACKER: BUY TP1 HIT"
+            )
+
+        # ----------------------------------------------------
+        # SL
+        # ----------------------------------------------------
+
+        if price <= trade["sl"]:
+
+            if trade["tp1_hit"]:
+
+                event = "SL_AFTER_TP1"
+
+            else:
+
+                event = "SL"
+
+            trade["closed"] = True
+            trade["result"] = event
+
+            broadcast_message(
+                trade_result_message(
+                    event,
+                    trade,
+                    price
+                )
+            )
+
+            print(
+                "TRACKER: BUY SL HIT"
+            )
+
+            ACTIVE_TRADE = None
+
+            return
+
+    # ========================================================
+    # SELL
+    # ========================================================
+
+    if signal == "SELL":
+
+        # ----------------------------------------------------
+        # TP3
+        # ----------------------------------------------------
+
+        if (
+            not trade["tp3_hit"]
+            and
+            price <= trade["tp3"]
+        ):
+
+            trade["tp3_hit"] = True
+            trade["closed"] = True
+            trade["result"] = "TP3"
+
+            broadcast_message(
+                trade_result_message(
+                    "TP3",
+                    trade,
+                    price
+                )
+            )
+
+            print(
+                "TRACKER: SELL TP3 HIT"
+            )
+
+            ACTIVE_TRADE = None
+
+            return
+
+        # ----------------------------------------------------
+        # TP2
+        # ----------------------------------------------------
+
+        if (
+            not trade["tp2_hit"]
+            and
+            price <= trade["tp2"]
+        ):
+
+            trade["tp2_hit"] = True
+
+            broadcast_message(
+                trade_result_message(
+                    "TP2",
+                    trade,
+                    price
+                )
+            )
+
+            print(
+                "TRACKER: SELL TP2 HIT"
+            )
+
+        # ----------------------------------------------------
+        # TP1
+        # ----------------------------------------------------
+
+        if (
+            not trade["tp1_hit"]
+            and
+            price <= trade["tp1"]
+        ):
+
+            trade["tp1_hit"] = True
+
+            broadcast_message(
+                trade_result_message(
+                    "TP1",
+                    trade,
+                    price
+                )
+            )
+
+            print(
+                "TRACKER: SELL TP1 HIT"
+            )
+
+        # ----------------------------------------------------
+        # SL
+        # ----------------------------------------------------
+
+        if price >= trade["sl"]:
+
+            if trade["tp1_hit"]:
+
+                event = "SL_AFTER_TP1"
+
+            else:
+
+                event = "SL"
+
+            trade["closed"] = True
+            trade["result"] = event
+
+            broadcast_message(
+                trade_result_message(
+                    event,
+                    trade,
+                    price
+                )
+            )
+
+            print(
+                "TRACKER: SELL SL HIT"
+            )
+
+            ACTIVE_TRADE = None
+
+            return
+
+
+# ============================================================
+# TRACKER LOOP
+# ============================================================
+
+def trade_tracker_worker():
+
+    print(
+        "=========================================="
+    )
+
+    print(
+        "TRADE TRACKER V4.2 STARTED"
+    )
+
+    print(
+        "=========================================="
+    )
+
+    while True:
+
+        try:
+
+            if ACTIVE_TRADE is not None:
+
+                check_active_trade()
+
+            time.sleep(
+                TRACKER_CHECK_SECONDS
+            )
+
+        except Exception as e:
+
+            print(
+                "TRACKER ERROR:",
+                repr(e)
+            )
+
+            time.sleep(15)
+
+
+# ============================================================
+# AUTO SIGNAL ENGINE
+# ============================================================
+
+def auto_signal_worker():
+
+    global LAST_AUTO_SIGNAL
+    global LAST_AUTO_SENT_TIME
+
+    print(
+        "=========================================="
+    )
+
+    print(
+        "AUTO SIGNAL ENGINE V4.2 STARTED"
+    )
+
+    print(
+        "=========================================="
+    )
+
+    while True:
+
+        try:
+
+            # ------------------------------------------------
+            # DISABLED
+            # ------------------------------------------------
+
+            if not AUTO_SIGNAL_ENABLED:
+
+                time.sleep(
+                    AUTO_CHECK_SECONDS
+                )
+
+                continue
+
+            # ------------------------------------------------
+            # NO USERS
+            # ------------------------------------------------
+
+            if not AUTO_CHAT_IDS:
+
+                print(
+                    "AUTO ENGINE: "
+                    "waiting for /start..."
+                )
+
+                time.sleep(
+                    AUTO_CHECK_SECONDS
+                )
+
+                continue
+
+            # ------------------------------------------------
+            # ACTIVE TRADE
+            # ------------------------------------------------
+
+            if ACTIVE_TRADE is not None:
+
+                print(
+                    "AUTO ENGINE: "
+                    "active trade exists."
+                )
+
+                time.sleep(
+                    AUTO_CHECK_SECONDS
+                )
+
+                continue
+
+            # ------------------------------------------------
+            # ANALYSIS
+            # ------------------------------------------------
+
+            print(
+                "AUTO ENGINE: "
+                "analysing XAU/USD..."
+            )
+
+            result = generate_signal()
+
+            if result.get("error"):
+
+                print(
+                    "AUTO DATA ERROR:",
+                    result["error"]
+                )
+
+                time.sleep(
+                    AUTO_CHECK_SECONDS
+                )
+
+                continue
+
+            if result["signal"] == "WAIT":
+
+                print(
+                    "AUTO WAIT | BUY:",
+                    result.get("buy_score"),
+                    "| SELL:",
+                    result.get("sell_score")
+                )
+
+                time.sleep(
+                    AUTO_CHECK_SECONDS
+                )
+
+                continue
+
+            # ------------------------------------------------
+            # LIVE PRICE
+            # ------------------------------------------------
+
+            live_price = get_live_price()
+
+            if live_price is None:
+
+                print(
+                    "AUTO ENGINE: "
+                    "live price unavailable."
+                )
+
+                time.sleep(
+                    AUTO_CHECK_SECONDS
+                )
+
+                continue
+
+            entry = result["entry"]
+
+            risk = abs(
+                entry -
+                result["sl"]
+            )
+
+            if risk <= 0:
+
+                print(
+                    "AUTO ENGINE: "
+                    "invalid risk."
+                )
+
+                time.sleep(
+                    AUTO_CHECK_SECONDS
+                )
+
+                continue
+
+            # ------------------------------------------------
+            # ENTRY DISTANCE FILTER
+            # ------------------------------------------------
+
+            distance = abs(
+                live_price -
+                entry
+            )
+
+            if distance > risk * 0.50:
+
+                print(
+                    "AUTO ENGINE: "
+                    "entry stretched."
+                )
+
+                time.sleep(
+                    AUTO_CHECK_SECONDS
+                )
+
+                continue
+
+            # ------------------------------------------------
+            # COOLDOWN
+            # ------------------------------------------------
+
+            now = time.time()
+
+            if (
+                now -
+                LAST_AUTO_SENT_TIME
+                <
+                AUTO_COOLDOWN_SECONDS
+            ):
+
+                print(
+                    "AUTO ENGINE: "
+                    "cooldown active."
+                )
+
+                time.sleep(
+                    AUTO_CHECK_SECONDS
+                )
+
+                continue
+
+            # ------------------------------------------------
+            # UNIQUE SIGNAL
+            # ------------------------------------------------
+
+            tf1 = result["tf1"]
+
+            signal_key = (
+                result["signal"],
+                tf1.get(
+                    "time",
+                    ""
+                )
+            )
+
+            if (
+                LAST_AUTO_SIGNAL ==
+                signal_key
+            ):
+
+                print(
+                    "AUTO ENGINE: "
+                    "duplicate blocked."
+                )
+
+                time.sleep(
+                    AUTO_CHECK_SECONDS
+                )
+
+                continue
+
+            # ------------------------------------------------
+            # CREATE TRADE
+            # ------------------------------------------------
+
+            created = create_active_trade(
+                result,
+                live_price
+            )
+
+            if not created:
+
+                time.sleep(
+                    AUTO_CHECK_SECONDS
+                )
+
+                continue
+
+            # ------------------------------------------------
+            # SEND SIGNAL
+            # ------------------------------------------------
+
+            message = auto_signal_message(
+                result,
+                live_price
+            )
+
+            sent_count = broadcast_message(
+                message
+            )
+
+            if sent_count > 0:
+
+                LAST_AUTO_SIGNAL = (
+                    signal_key
+                )
+
+                LAST_AUTO_SENT_TIME = (
+                    time.time()
+                )
+
+                print(
+                    "🔥 AUTO SIGNAL SENT:",
+                    result["signal"],
+                    "| Confidence:",
+                    result["confidence"],
+                    "| Chats:",
+                    sent_count
+                )
+
+            else:
+
+                # Agar yuborishning iloji bo‘lmasa,
+                # active trade'ni bekor qilamiz.
+                print(
+                    "AUTO ENGINE: "
+                    "no message sent."
+                )
+
+                ACTIVE_TRADE = None
+
+            time.sleep(
+                AUTO_CHECK_SECONDS
+            )
+
+        except Exception as e:
+
+            print(
+                "AUTO ENGINE ERROR:",
+                repr(e)
+            )
+
+            time.sleep(60)
+
+
+# ============================================================
+# TECHNICAL
 # ============================================================
 
 def technical_message():
@@ -1411,30 +2391,30 @@ def advisor_message():
 
         advice = (
             "🟢 BUY setup tasdiqlangan.\n"
-            "Entry faqat ko‘rsatilgan "
-            "SL bilan ko‘rib chiqiladi."
+            "Entry ko‘rsatilgan "
+            "risk bilan ko‘rib chiqiladi."
         )
 
     elif result["signal"] == "SELL":
 
         advice = (
             "🔴 SELL setup tasdiqlangan.\n"
-            "Entry faqat ko‘rsatilgan "
-            "SL bilan ko‘rib chiqiladi."
+            "Entry ko‘rsatilgan "
+            "risk bilan ko‘rib chiqiladi."
         )
 
     else:
 
         advice = (
             "🟡 HOZIR WAIT.\n\n"
-            "15M/5M/1M alignment yoki "
-            "1M structure confirmation "
-            "yetishmayapti.\n\n"
+            "15M / 5M / 1M alignment "
+            "yoki 1M structure "
+            "confirmation yetishmayapti.\n\n"
             "Bozorni quvib entry qilmaslik."
         )
 
     return (
-        "🤖 <b>BEGZOD AI ADVISOR V4</b>\n\n"
+        "🤖 <b>BEGZOD AI ADVISOR V4.2</b>\n\n"
 
         "🥇 Price: "
         f"<b>{tf1['price']:.2f}</b>\n\n"
@@ -1449,10 +2429,11 @@ def advisor_message():
         f"<b>{tf1['trend']}</b>\n\n"
 
         "📌 <b>ADVICE</b>\n"
+
         f"{advice}\n\n"
 
-        "⚠️ Bu avtomatik texnik "
-        "tahlil. Kafolatlangan natija emas."
+        "⚠️ Avtomatik texnik tahlil. "
+        "Kafolatlangan natija emas."
     )
 
 
@@ -1495,9 +2476,64 @@ def news_message():
         "News provider hali "
         "signal engine'ga ulanmagan.\n\n"
 
-        "⚠️ Keyingi V5 bosqichida "
-        "high-impact news filtri "
-        "qo‘shiladi."
+        "⚠️ Fundamental modul "
+        "hozircha faol emas."
+    )
+
+
+# ============================================================
+# ACTIVE TRADE STATUS
+# ============================================================
+
+def active_trade_message():
+
+    if ACTIVE_TRADE is None:
+
+        return (
+            "📡 <b>TRADE TRACKER</b>\n\n"
+            "Hozir aktiv signal yo‘q.\n\n"
+            "Bot yangi kuchli setup "
+            "kutmoqda."
+        )
+
+    trade = ACTIVE_TRADE
+
+    price = get_live_price()
+
+    if price is None:
+        price = 0
+
+    return (
+        "📡 <b>ACTIVE TRADE</b>\n\n"
+
+        f"{'🟢' if trade['signal'] == 'BUY' else '🔴'} "
+        f"<b>XAU/USD {trade['signal']}</b>\n\n"
+
+        "Entry: "
+        f"<b>{trade['entry']:.2f}</b>\n"
+
+        "Current: "
+        f"<b>{price:.2f}</b>\n\n"
+
+        "SL: "
+        f"<b>{trade['sl']:.2f}</b>\n"
+
+        "TP1: "
+        f"<b>{trade['tp1']:.2f}</b> "
+        f"{'✅' if trade['tp1_hit'] else '⏳'}\n"
+
+        "TP2: "
+        f"<b>{trade['tp2']:.2f}</b> "
+        f"{'✅' if trade['tp2_hit'] else '⏳'}\n"
+
+        "TP3: "
+        f"<b>{trade['tp3']:.2f}</b> "
+        f"{'✅' if trade['tp3_hit'] else '⏳'}\n\n"
+
+        "🧠 Setup Strength: "
+        f"<b>{trade['confidence']}/100</b>\n\n"
+
+        "📡 Tracker: ACTIVE"
     )
 
 
@@ -1507,18 +2543,33 @@ def news_message():
 
 def start_message(chat_id):
 
+    register_auto_chat(
+        chat_id
+    )
+
     send_message(
         chat_id,
         (
-            "🤖 <b>BEGZOD AI XAU/USD V4</b>\n\n"
+            "🤖 <b>BEGZOD AI XAU/USD V4.2</b>\n\n"
 
             "🥇 Real-time XAU/USD\n"
+
             "📊 15M + 5M + 1M\n"
+
             "📐 BOS / CHoCH\n"
+
             "💧 Liquidity\n"
-            "🎯 Strict Entry Filter\n"
+
+            "🎯 Auto Signal\n"
+
             "🛑 Dynamic SL\n"
-            "💰 TP1 / TP2 / TP3\n\n"
+
+            "💰 TP1 / TP2 / TP3\n"
+
+            "📡 Trade Tracker\n\n"
+
+            "🔥 Kuchli setup paydo bo‘lsa "
+            "bot avtomatik signal yuboradi.\n\n"
 
             "👇 Bo‘limni tanlang."
         )
@@ -1552,7 +2603,15 @@ def process_update(
             text
         )
 
+        # Har qanday user aktiv bo‘lsa,
+        # auto signal uchun ro‘yxatdan o‘tadi.
+        register_auto_chat(
+            chat_id
+        )
+
+        # ====================================================
         # START
+        # ====================================================
 
         if text == "/start":
 
@@ -1562,7 +2621,9 @@ def process_update(
 
             return
 
+        # ====================================================
         # HELP
+        # ====================================================
 
         if text == "/help":
 
@@ -1576,6 +2637,7 @@ def process_update(
                     "/signal\n"
                     "/technical\n"
                     "/advisor\n"
+                    "/trade\n"
                     "/fundamental\n"
                     "/news"
                 )
@@ -1583,7 +2645,9 @@ def process_update(
 
             return
 
+        # ====================================================
         # PRICE
+        # ====================================================
 
         if text in (
             "/price",
@@ -1611,6 +2675,7 @@ def process_update(
                     chat_id,
                     (
                         "🥇 <b>XAU/USD</b>\n\n"
+
                         "💰 Live Price: "
                         f"<b>{price:.2f}</b>"
                     )
@@ -1618,7 +2683,9 @@ def process_update(
 
             return
 
+        # ====================================================
         # SIGNAL
+        # ====================================================
 
         if text in (
             "/signal",
@@ -1627,7 +2694,7 @@ def process_update(
 
             send_message(
                 chat_id,
-                "🔎 V4 signal analiz qilinmoqda...",
+                "🔎 V4.2 signal analiz qilinmoqda...",
                 False
             )
 
@@ -1654,7 +2721,9 @@ def process_update(
 
             return
 
+        # ====================================================
         # TECHNICAL
+        # ====================================================
 
         if text in (
             "/technical",
@@ -1690,7 +2759,9 @@ def process_update(
 
             return
 
+        # ====================================================
         # ADVISOR
+        # ====================================================
 
         if text in (
             "/advisor",
@@ -1726,7 +2797,25 @@ def process_update(
 
             return
 
+        # ====================================================
+        # TRADE
+        # ====================================================
+
+        if text in (
+            "/trade",
+            "📡 Trade Tracker"
+        ):
+
+            send_message(
+                chat_id,
+                active_trade_message()
+            )
+
+            return
+
+        # ====================================================
         # FUNDAMENTAL
+        # ====================================================
 
         if text in (
             "/fundamental",
@@ -1740,7 +2829,9 @@ def process_update(
 
             return
 
+        # ====================================================
         # NEWS
+        # ====================================================
 
         if text in (
             "/news",
@@ -1754,7 +2845,9 @@ def process_update(
 
             return
 
+        # ====================================================
         # SETTINGS
+        # ====================================================
 
         if text == "⚙️ Settings":
 
@@ -1764,17 +2857,28 @@ def process_update(
                     "⚙️ <b>SETTINGS</b>\n\n"
 
                     "Symbol: XAU/USD\n"
+
                     "TF: 15M / 5M / 1M\n"
+
                     "SL: ATR × 1.20\n"
+
                     "TP: 1R / 2R / 3R\n"
+
                     "Min Score: 9\n"
-                    "1M confirmation: REQUIRED"
+
+                    "Auto Signal: ON\n"
+
+                    "Trade Tracker: ON\n"
+
+                    "Tracker: 15 seconds"
                 )
             )
 
             return
 
+        # ====================================================
         # UNKNOWN
+        # ====================================================
 
         send_message(
             chat_id,
@@ -1922,7 +3026,7 @@ class HealthHandler(
         self.end_headers()
 
         self.wfile.write(
-            b"BEGZOD AI XAUUSD V4 RUNNING"
+            b"BEGZOD AI XAUUSD V4.2 RUNNING"
         )
 
     def log_message(
@@ -1966,7 +3070,7 @@ def start_server():
 def main():
 
     print(
-        "Starting BEGZOD AI XAUUSD V4..."
+        "Starting BEGZOD AI XAU/USD V4.2..."
     )
 
     if not BOT_TOKEN:
@@ -1985,10 +3089,36 @@ def main():
 
         delete_webhook()
 
+    # --------------------------------------------------------
+    # RENDER SERVER
+    # --------------------------------------------------------
+
     threading.Thread(
         target=start_server,
         daemon=True
     ).start()
+
+    # --------------------------------------------------------
+    # AUTO SIGNAL
+    # --------------------------------------------------------
+
+    threading.Thread(
+        target=auto_signal_worker,
+        daemon=True
+    ).start()
+
+    # --------------------------------------------------------
+    # TRADE TRACKER
+    # --------------------------------------------------------
+
+    threading.Thread(
+        target=trade_tracker_worker,
+        daemon=True
+    ).start()
+
+    # --------------------------------------------------------
+    # NO BOT TOKEN
+    # --------------------------------------------------------
 
     if not BOT_TOKEN:
 
@@ -1996,8 +3126,16 @@ def main():
 
             time.sleep(60)
 
+    # --------------------------------------------------------
+    # TELEGRAM
+    # --------------------------------------------------------
+
     telegram_loop()
 
+
+# ============================================================
+# RUN
+# ============================================================
 
 if __name__ == "__main__":
 
