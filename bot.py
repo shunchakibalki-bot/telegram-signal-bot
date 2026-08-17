@@ -4,264 +4,630 @@ import threading
 import requests
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-# ==============================
-# SETTINGS
-# ==============================
+# ============================================================
+# CONFIG
+# ============================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN environment variable not found")
+    raise RuntimeError("BOT_TOKEN environment variable is missing")
 
-TELEGRAM_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
+TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-SYMBOL = "GC=F"       # Gold Futures = XAUUSD proxy
+SYMBOL = "GC=F"
 INTERVAL = "5m"
 RANGE = "5d"
 
+HEADERS = {
+    "User-Agent": "Mozilla/5.0",
+    "Accept": "application/json,text/plain,*/*",
+}
 
-# ==============================
+# ============================================================
 # TELEGRAM
-# ==============================
+# ============================================================
 
 def send_message(chat_id, text):
     try:
-        requests.post(
-            f"{TELEGRAM_URL}/sendMessage",
+        response = requests.post(
+            f"{TELEGRAM_API}/sendMessage",
             json={
                 "chat_id": chat_id,
                 "text": text,
                 "parse_mode": "HTML"
             },
-            timeout=15
+            timeout=20
         )
+
+        if not response.ok:
+            print(
+                "Telegram send error:",
+                response.status_code,
+                response.text[:300]
+            )
+
     except Exception as e:
-        print("Telegram error:", e)
+        print("Telegram request error:", repr(e))
 
 
-# ==============================
+# ============================================================
 # MARKET DATA
-# ==============================
+# ============================================================
 
-def get_gold_data():
-    url = (
-        "https://query1.finance.yahoo.com/v8/finance/chart/"
-        f"{SYMBOL}?interval={INTERVAL}&range={RANGE}"
+def fetch_yahoo(url):
+
+    response = requests.get(
+        url,
+        headers=HEADERS,
+        timeout=20
     )
 
-    r = requests.get(url, timeout=20)
-    data = r.json()
+    print(
+        "Yahoo response:",
+        response.status_code,
+        response.headers.get("content-type")
+    )
 
-    result = data["chart"]["result"][0]
+    if response.status_code != 200:
+        raise RuntimeError(
+            f"Yahoo HTTP {response.status_code}"
+        )
 
-    timestamps = result["timestamp"]
-    quote = result["indicators"]["quote"][0]
+    body = response.text.strip()
 
-    candles = []
+    if not body:
+        raise RuntimeError(
+            "Yahoo returned an empty response"
+        )
 
-    for i in range(len(timestamps)):
+    try:
+        return response.json()
+
+    except ValueError:
+        raise RuntimeError(
+            "Yahoo returned invalid JSON"
+        )
+
+
+def get_gold_data():
+
+    urls = [
+        (
+            "https://query1.finance.yahoo.com/v8/finance/chart/"
+            f"{SYMBOL}?interval={INTERVAL}&range={RANGE}"
+        ),
+        (
+            "https://query2.finance.yahoo.com/v8/finance/chart/"
+            f"{SYMBOL}?interval={INTERVAL}&range={RANGE}"
+        )
+    ]
+
+    last_error = None
+
+    for url in urls:
+
         try:
-            candles.append({
-                "time": timestamps[i],
-                "open": float(quote["open"][i]),
-                "high": float(quote["high"][i]),
-                "low": float(quote["low"][i]),
-                "close": float(quote["close"][i]),
-                "volume": float(quote["volume"][i] or 0)
-            })
-        except:
-            pass
 
-    return candles
+            data = fetch_yahoo(url)
+
+            chart = data.get("chart")
+
+            if not chart:
+                raise RuntimeError(
+                    "Yahoo response has no chart object"
+                )
+
+            if chart.get("error"):
+                raise RuntimeError(
+                    f"Yahoo API error: {chart['error']}"
+                )
+
+            results = chart.get("result")
+
+            if not results:
+                raise RuntimeError(
+                    "Yahoo returned no result"
+                )
+
+            result = results[0]
+
+            timestamps = result.get("timestamp")
+
+            indicators = result.get(
+                "indicators",
+                {}
+            )
+
+            quote_list = indicators.get(
+                "quote",
+                []
+            )
+
+            if not timestamps or not quote_list:
+                raise RuntimeError(
+                    "Yahoo returned no candle data"
+                )
+
+            quote = quote_list[0]
+
+            opens = quote.get("open", [])
+            highs = quote.get("high", [])
+            lows = quote.get("low", [])
+            closes = quote.get("close", [])
+            volumes = quote.get("volume", [])
+
+            candles = []
+
+            length = min(
+                len(timestamps),
+                len(opens),
+                len(highs),
+                len(lows),
+                len(closes)
+            )
+
+            for i in range(length):
+
+                try:
+
+                    if (
+                        opens[i] is None
+                        or highs[i] is None
+                        or lows[i] is None
+                        or closes[i] is None
+                    ):
+                        continue
+
+                    volume = 0
+
+                    if (
+                        i < len(volumes)
+                        and volumes[i] is not None
+                    ):
+                        volume = float(
+                            volumes[i]
+                        )
+
+                    candles.append({
+                        "time": timestamps[i],
+                        "open": float(opens[i]),
+                        "high": float(highs[i]),
+                        "low": float(lows[i]),
+                        "close": float(closes[i]),
+                        "volume": volume
+                    })
+
+                except (
+                    TypeError,
+                    ValueError,
+                    IndexError
+                ):
+                    continue
+
+            if len(candles) < 60:
+                raise RuntimeError(
+                    f"Not enough candles: {len(candles)}"
+                )
+
+            print(
+                f"Market data OK: "
+                f"{len(candles)} candles"
+            )
+
+            return candles
+
+        except Exception as e:
+
+            print(
+                "Market endpoint failed:",
+                repr(e)
+            )
+
+            last_error = e
+
+    raise RuntimeError(
+        f"XAUUSD data unavailable: {last_error}"
+    )
 
 
-# ==============================
-# INDICATORS
-# ==============================
+# ============================================================
+# EMA
+# ============================================================
 
 def ema(values, period):
+
     if len(values) < period:
         return None
 
-    multiplier = 2 / (period + 1)
+    result = sum(
+        values[:period]
+    ) / period
 
-    result = sum(values[:period]) / period
+    multiplier = 2 / (
+        period + 1
+    )
 
     for price in values[period:]:
-        result = (price - result) * multiplier + result
+
+        result = (
+            (price - result)
+            * multiplier
+            + result
+        )
 
     return result
 
 
+# ============================================================
+# RSI
+# ============================================================
+
 def rsi(values, period=14):
+
     if len(values) < period + 1:
-        return 50
+        return 50.0
 
     gains = []
     losses = []
 
     for i in range(1, len(values)):
-        change = values[i] - values[i - 1]
+
+        change = (
+            values[i]
+            - values[i - 1]
+        )
 
         if change > 0:
+
             gains.append(change)
-            losses.append(0)
+            losses.append(0.0)
+
         else:
-            gains.append(0)
-            losses.append(abs(change))
 
-    avg_gain = sum(gains[:period]) / period
-    avg_loss = sum(losses[:period]) / period
+            gains.append(0.0)
+            losses.append(
+                abs(change)
+            )
 
-    for i in range(period, len(gains)):
-        avg_gain = ((avg_gain * (period - 1)) + gains[i]) / period
-        avg_loss = ((avg_loss * (period - 1)) + losses[i]) / period
+    avg_gain = (
+        sum(gains[:period])
+        / period
+    )
+
+    avg_loss = (
+        sum(losses[:period])
+        / period
+    )
+
+    for i in range(
+        period,
+        len(gains)
+    ):
+
+        avg_gain = (
+            (
+                avg_gain
+                * (period - 1)
+            )
+            + gains[i]
+        ) / period
+
+        avg_loss = (
+            (
+                avg_loss
+                * (period - 1)
+            )
+            + losses[i]
+        ) / period
 
     if avg_loss == 0:
-        return 100
+        return 100.0
 
-    rs = avg_gain / avg_loss
+    rs = (
+        avg_gain
+        / avg_loss
+    )
 
-    return 100 - (100 / (1 + rs))
+    return (
+        100
+        - (
+            100
+            / (1 + rs)
+        )
+    )
 
+
+# ============================================================
+# ATR
+# ============================================================
 
 def atr(candles, period=14):
+
     if len(candles) < period + 1:
         return 3.0
 
-    true_ranges = []
+    ranges = []
 
-    for i in range(1, len(candles)):
+    for i in range(
+        1,
+        len(candles)
+    ):
+
         high = candles[i]["high"]
         low = candles[i]["low"]
-        previous_close = candles[i - 1]["close"]
 
-        tr = max(
-            high - low,
-            abs(high - previous_close),
-            abs(low - previous_close)
+        previous_close = (
+            candles[i - 1]["close"]
         )
 
-        true_ranges.append(tr)
+        true_range = max(
+            high - low,
+            abs(
+                high
+                - previous_close
+            ),
+            abs(
+                low
+                - previous_close
+            )
+        )
 
-    return sum(true_ranges[-period:]) / period
+        ranges.append(
+            true_range
+        )
+
+    return (
+        sum(
+            ranges[-period:]
+        )
+        / period
+    )
 
 
-# ==============================
+# ============================================================
+# MARKET STRUCTURE
+# ============================================================
+
+def structure_score(candles):
+
+    if len(candles) < 10:
+        return 0, 0
+
+    recent = candles[-6:]
+
+    previous_high = max(
+        c["high"]
+        for c in candles[-10:-2]
+    )
+
+    previous_low = min(
+        c["low"]
+        for c in candles[-10:-2]
+    )
+
+    last = recent[-1]
+
+    buy = 0
+    sell = 0
+
+    if last["close"] > previous_high:
+        buy += 2
+
+    if last["close"] < previous_low:
+        sell += 2
+
+    return buy, sell
+
+
+# ============================================================
 # SIGNAL ENGINE
-# ==============================
+# ============================================================
 
 def generate_signal():
+
     candles = get_gold_data()
 
-    if len(candles) < 60:
-        return "WAIT", None
-
-    closes = [c["close"] for c in candles]
+    closes = [
+        c["close"]
+        for c in candles
+    ]
 
     price = closes[-1]
 
-    ema20 = ema(closes, 20)
-    ema50 = ema(closes, 50)
+    ema20 = ema(
+        closes,
+        20
+    )
 
-    current_rsi = rsi(closes, 14)
+    ema50 = ema(
+        closes,
+        50
+    )
 
-    current_atr = atr(candles, 14)
+    current_rsi = rsi(
+        closes,
+        14
+    )
+
+    current_atr = atr(
+        candles,
+        14
+    )
 
     last = candles[-1]
+
     previous = candles[-2]
 
-    bullish_candle = last["close"] > last["open"]
-    bearish_candle = last["close"] < last["open"]
+    buy_score = 0
+    sell_score = 0
 
-    bullish_break = last["close"] > previous["high"]
-    bearish_break = last["close"] < previous["low"]
-
-    score_buy = 0
-    score_sell = 0
-
+    # --------------------------------------------------------
     # TREND
+    # --------------------------------------------------------
+
     if ema20 > ema50:
-        score_buy += 2
+        buy_score += 2
 
-    if ema20 < ema50:
-        score_sell += 2
+    elif ema20 < ema50:
+        sell_score += 2
 
+    # --------------------------------------------------------
     # RSI
-    if 50 < current_rsi < 70:
-        score_buy += 1
+    # --------------------------------------------------------
 
-    if 30 < current_rsi < 50:
-        score_sell += 1
+    if 52 <= current_rsi <= 68:
+        buy_score += 1
 
-    # MOMENTUM
-    if bullish_candle:
-        score_buy += 1
+    elif 32 <= current_rsi <= 48:
+        sell_score += 1
 
-    if bearish_candle:
-        score_sell += 1
+    # --------------------------------------------------------
+    # CANDLE MOMENTUM
+    # --------------------------------------------------------
 
+    if last["close"] > last["open"]:
+        buy_score += 1
+
+    elif last["close"] < last["open"]:
+        sell_score += 1
+
+    # --------------------------------------------------------
     # BREAKOUT
-    if bullish_break:
-        score_buy += 2
+    # --------------------------------------------------------
 
-    if bearish_break:
-        score_sell += 2
+    if last["close"] > previous["high"]:
+        buy_score += 2
 
-    # ==========================
+    elif last["close"] < previous["low"]:
+        sell_score += 2
+
+    # --------------------------------------------------------
+    # STRUCTURE
+    # --------------------------------------------------------
+
+    structure_buy, structure_sell = (
+        structure_score(candles)
+    )
+
+    buy_score += structure_buy
+    sell_score += structure_sell
+
+    # --------------------------------------------------------
+    # NO TRADE
+    # --------------------------------------------------------
+
+    if (
+        buy_score < 5
+        and sell_score < 5
+    ):
+
+        return "WAIT", {
+            "entry": price,
+            "rsi": current_rsi,
+            "ema20": ema20,
+            "ema50": ema50,
+            "atr": current_atr,
+            "buy_score": buy_score,
+            "sell_score": sell_score
+        }
+
+    # --------------------------------------------------------
     # BUY
-    # ==========================
+    # --------------------------------------------------------
 
-    if score_buy >= 5 and score_buy > score_sell:
+    if (
+        buy_score >= 5
+        and buy_score > sell_score
+    ):
 
         entry = price
 
-        stop_loss = entry - (current_atr * 1.2)
+        risk = current_atr * 1.2
 
-        risk = entry - stop_loss
+        sl = (
+            entry - risk
+        )
 
-        take_profit_1 = entry + risk
-        take_profit_2 = entry + (risk * 2)
-        take_profit_3 = entry + (risk * 3)
+        tp1 = (
+            entry + risk
+        )
+
+        tp2 = (
+            entry + risk * 2
+        )
+
+        tp3 = (
+            entry + risk * 3
+        )
+
+        confidence = min(
+            95,
+            50
+            + buy_score * 5
+        )
 
         return "BUY", {
             "entry": entry,
-            "sl": stop_loss,
-            "tp1": take_profit_1,
-            "tp2": take_profit_2,
-            "tp3": take_profit_3,
+            "sl": sl,
+            "tp1": tp1,
+            "tp2": tp2,
+            "tp3": tp3,
             "rsi": current_rsi,
             "ema20": ema20,
             "ema50": ema50,
-            "score": score_buy
+            "atr": current_atr,
+            "score": buy_score,
+            "confidence": confidence
         }
 
-    # ==========================
+    # --------------------------------------------------------
     # SELL
-    # ==========================
+    # --------------------------------------------------------
 
-    if score_sell >= 5 and score_sell > score_buy:
+    if (
+        sell_score >= 5
+        and sell_score > buy_score
+    ):
 
         entry = price
 
-        stop_loss = entry + (current_atr * 1.2)
+        risk = current_atr * 1.2
 
-        risk = stop_loss - entry
+        sl = (
+            entry + risk
+        )
 
-        take_profit_1 = entry - risk
-        take_profit_2 = entry - (risk * 2)
-        take_profit_3 = entry - (risk * 3)
+        tp1 = (
+            entry - risk
+        )
+
+        tp2 = (
+            entry - risk * 2
+        )
+
+        tp3 = (
+            entry - risk * 3
+        )
+
+        confidence = min(
+            95,
+            50
+            + sell_score * 5
+        )
 
         return "SELL", {
             "entry": entry,
-            "sl": stop_loss,
-            "tp1": take_profit_1,
-            "tp2": take_profit_2,
-            "tp3": take_profit_3,
+            "sl": sl,
+            "tp1": tp1,
+            "tp2": tp2,
+            "tp3": tp3,
             "rsi": current_rsi,
             "ema20": ema20,
             "ema50": ema50,
-            "score": score_sell
+            "atr": current_atr,
+            "score": sell_score,
+            "confidence": confidence
         }
 
     return "WAIT", {
@@ -269,53 +635,89 @@ def generate_signal():
         "rsi": current_rsi,
         "ema20": ema20,
         "ema50": ema50,
-        "score": max(score_buy, score_sell)
+        "atr": current_atr,
+        "buy_score": buy_score,
+        "sell_score": sell_score
     }
 
 
-# ==============================
-# SIGNAL MESSAGE
-# ==============================
+# ============================================================
+# FORMAT SIGNAL
+# ============================================================
 
-def signal_message():
+def create_signal_message():
 
-    signal, data = generate_signal()
-
-    if data is None:
-        return "⚠️ Ma'lumot olishda xatolik."
+    signal, data = (
+        generate_signal()
+    )
 
     if signal == "WAIT":
 
         return (
             "🟡 <b>XAUUSD SIGNAL</b>\n\n"
             "⏳ <b>WAIT</b>\n\n"
-            f"💰 Price: <b>{data['entry']:.2f}</b>\n"
-            f"📊 RSI: <b>{data['rsi']:.1f}</b>\n"
-            f"📈 EMA20: <b>{data['ema20']:.2f}</b>\n"
-            f"📉 EMA50: <b>{data['ema50']:.2f}</b>\n\n"
+            f"💰 Price: "
+            f"<b>{data['entry']:.2f}</b>\n"
+            f"📊 RSI: "
+            f"<b>{data['rsi']:.1f}</b>\n"
+            f"📈 EMA20: "
+            f"<b>{data['ema20']:.2f}</b>\n"
+            f"📉 EMA50: "
+            f"<b>{data['ema50']:.2f}</b>\n"
+            f"🔥 Buy score: "
+            f"<b>{data['buy_score']}</b>\n"
+            f"🔥 Sell score: "
+            f"<b>{data['sell_score']}</b>\n\n"
             "Bozor sharoiti aniq emas."
         )
 
-    emoji = "🟢" if signal == "BUY" else "🔴"
+    if signal == "BUY":
+        emoji = "🟢"
+    else:
+        emoji = "🔴"
 
     return (
-        f"{emoji} <b>XAUUSD {signal}</b>\n\n"
-        f"🎯 Entry: <b>{data['entry']:.2f}</b>\n"
-        f"🛑 Stop Loss: <b>{data['sl']:.2f}</b>\n\n"
-        f"💰 TP1: <b>{data['tp1']:.2f}</b>\n"
-        f"💰 TP2: <b>{data['tp2']:.2f}</b>\n"
-        f"💰 TP3: <b>{data['tp3']:.2f}</b>\n\n"
-        f"📊 RSI: <b>{data['rsi']:.1f}</b>\n"
-        f"📈 EMA20: <b>{data['ema20']:.2f}</b>\n"
-        f"📉 EMA50: <b>{data['ema50']:.2f}</b>\n"
-        f"🔥 Signal Score: <b>{data['score']}/6+</b>\n\n"
-        "⚠️ Risk managementdan foydalaning."
+        f"{emoji} "
+        f"<b>XAUUSD {signal}</b>\n\n"
+
+        f"🎯 Entry: "
+        f"<b>{data['entry']:.2f}</b>\n"
+
+        f"🛑 SL: "
+        f"<b>{data['sl']:.2f}</b>\n\n"
+
+        f"💰 TP1: "
+        f"<b>{data['tp1']:.2f}</b>\n"
+
+        f"💰 TP2: "
+        f"<b>{data['tp2']:.2f}</b>\n"
+
+        f"💰 TP3: "
+        f"<b>{data['tp3']:.2f}</b>\n\n"
+
+        f"📊 RSI: "
+        f"<b>{data['rsi']:.1f}</b>\n"
+
+        f"📈 EMA20: "
+        f"<b>{data['ema20']:.2f}</b>\n"
+
+        f"📉 EMA50: "
+        f"<b>{data['ema50']:.2f}</b>\n"
+
+        f"🔥 Score: "
+        f"<b>{data['score']}</b>\n"
+
+        f"🧠 Confidence: "
+        f"<b>{data['confidence']}%</b>\n\n"
+
+        "⚠️ Bu signal avtomatik texnik "
+        "analiz asosida ishlab chiqildi."
     )
 
 
-# ==============================
-# TELEGRAM COMMANDS
-# ==============================
+# ============================================================
+# COMMAND PROCESSOR
+# ============================================================
 
 def process_update(update):
 
@@ -324,21 +726,36 @@ def process_update(update):
 
     message = update["message"]
 
-    chat_id = message["chat"]["id"]
+    chat_id = (
+        message["chat"]["id"]
+    )
 
-    text = message.get("text", "").strip()
+    text = message.get(
+        "text",
+        ""
+    ).strip()
 
+    # START
     if text == "/start":
 
         send_message(
             chat_id,
-            "🤖 <b>XAUUSD AI Signal Bot</b>\n\n"
-            "Bot ishga tushdi.\n\n"
-            "📌 /signal — XAUUSD signal\n"
-            "📌 /price — joriy narx\n"
-            "📌 /help — yordam"
+            (
+                "🤖 <b>AI XAUUSD "
+                "Signal Bot</b>\n\n"
+
+                "✅ Bot online.\n\n"
+
+                "📌 /signal — XAUUSD "
+                "analiz\n"
+
+                "📌 /price — joriy narx\n"
+
+                "📌 /help — yordam"
+            )
         )
 
+    # SIGNAL
     elif text == "/signal":
 
         send_message(
@@ -347,52 +764,91 @@ def process_update(update):
         )
 
         try:
-            result = signal_message()
-            send_message(chat_id, result)
 
-        except Exception as e:
+            result = (
+                create_signal_message()
+            )
 
             send_message(
                 chat_id,
-                f"❌ Analiz xatosi:\n{str(e)}"
+                result
             )
 
+        except Exception as e:
+
+            print(
+                "Signal error:",
+                repr(e)
+            )
+
+            send_message(
+                chat_id,
+                (
+                    "❌ <b>Analiz xatosi</b>\n\n"
+                    f"<code>{str(e)}</code>"
+                )
+            )
+
+    # PRICE
     elif text == "/price":
 
         try:
 
-            candles = get_gold_data()
+            candles = (
+                get_gold_data()
+            )
 
-            price = candles[-1]["close"]
+            if not candles:
+                raise RuntimeError(
+                    "No market data"
+                )
+
+            price = (
+                candles[-1]["close"]
+            )
 
             send_message(
                 chat_id,
-                f"🥇 <b>XAUUSD</b>\n\n"
-                f"💰 Current price: <b>{price:.2f}</b>"
+                (
+                    "🥇 <b>XAUUSD</b>\n\n"
+                    f"💰 Current price: "
+                    f"<b>{price:.2f}</b>"
+                )
             )
 
         except Exception as e:
 
-            send_message(
-                chat_id,
-                f"❌ Price error: {str(e)}"
+            print(
+                "Price error:",
+                repr(e)
             )
 
+            send_message(
+                chat_id,
+                (
+                    "❌ <b>Price error</b>\n\n"
+                    f"<code>{str(e)}</code>"
+                )
+            )
+
+    # HELP
     elif text == "/help":
 
         send_message(
             chat_id,
-            "📚 <b>Commands</b>\n\n"
-            "/start — Botni boshlash\n"
-            "/signal — XAUUSD analiz\n"
-            "/price — XAUUSD narxi\n"
-            "/help — Yordam"
+            (
+                "📚 <b>Commands</b>\n\n"
+                "/start — Botni boshlash\n"
+                "/signal — XAUUSD signal\n"
+                "/price — narx\n"
+                "/help — yordam"
+            )
         )
 
 
-# ==============================
+# ============================================================
 # TELEGRAM POLLING
-# ==============================
+# ============================================================
 
 def telegram_loop():
 
@@ -402,39 +858,104 @@ def telegram_loop():
 
         try:
 
+            params = {
+                "timeout": 30
+            }
+
+            if offset is not None:
+                params["offset"] = offset
+
             response = requests.get(
-                f"{TELEGRAM_URL}/getUpdates",
-                params={
-                    "timeout": 30,
-                    "offset": offset
-                },
+                f"{TELEGRAM_API}/getUpdates",
+                params=params,
                 timeout=40
             )
 
-            data = response.json()
+            if response.status_code != 200:
 
-            if not data.get("ok"):
+                print(
+                    "Telegram HTTP:",
+                    response.status_code
+                )
+
                 time.sleep(5)
                 continue
 
-            for update in data["result"]:
+            try:
 
-                offset = update["update_id"] + 1
+                data = (
+                    response.json()
+                )
 
-                process_update(update)
+            except ValueError:
+
+                print(
+                    "Telegram returned "
+                    "invalid JSON"
+                )
+
+                time.sleep(5)
+                continue
+
+            if not data.get("ok"):
+
+                print(
+                    "Telegram API error:",
+                    data
+                )
+
+                time.sleep(5)
+                continue
+
+            for update in data.get(
+                "result",
+                []
+            ):
+
+                offset = (
+                    update["update_id"]
+                    + 1
+                )
+
+                try:
+
+                    process_update(
+                        update
+                    )
+
+                except Exception as e:
+
+                    print(
+                        "Update error:",
+                        repr(e)
+                    )
+
+        except requests.RequestException as e:
+
+            print(
+                "Telegram network error:",
+                repr(e)
+            )
+
+            time.sleep(5)
 
         except Exception as e:
 
-            print("Polling error:", e)
+            print(
+                "Polling error:",
+                repr(e)
+            )
 
             time.sleep(5)
 
 
-# ==============================
-# RENDER WEB SERVER
-# ==============================
+# ============================================================
+# RENDER HEALTH SERVER
+# ============================================================
 
-class HealthHandler(BaseHTTPRequestHandler):
+class HealthHandler(
+    BaseHTTPRequestHandler
+):
 
     def do_GET(self):
 
@@ -448,40 +969,59 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
         self.wfile.write(
-            b"XAUUSD Telegram Signal Bot is running!"
+            b"XAUUSD Telegram Signal Bot is running"
         )
 
-    def log_message(self, format, *args):
+    def log_message(
+        self,
+        format,
+        *args
+    ):
         return
 
 
 def start_server():
 
     port = int(
-        os.environ.get("PORT", 10000)
+        os.environ.get(
+            "PORT",
+            "10000"
+        )
     )
 
     server = HTTPServer(
-        ("0.0.0.0", port),
+        (
+            "0.0.0.0",
+            port
+        ),
         HealthHandler
     )
 
     print(
-        f"Web server running on port {port}"
+        f"Health server running "
+        f"on port {port}"
     )
 
     server.serve_forever()
 
 
-# ==============================
-# START BOT
-# ==============================
+# ============================================================
+# MAIN
+# ============================================================
 
 if __name__ == "__main__":
 
-    print("==============================")
-    print("XAUUSD TELEGRAM SIGNAL BOT")
-    print("==============================")
+    print(
+        "================================"
+    )
+
+    print(
+        "XAUUSD TELEGRAM SIGNAL BOT"
+    )
+
+    print(
+        "================================"
+    )
 
     threading.Thread(
         target=start_server,
